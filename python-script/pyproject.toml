@@ -9,4 +9,4 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-carla = { path = "../carla-pylib/carla-0.9.16-cp312-cp312-manylinux_2_31_x86_64.whl" }
+carla = { path = "carla-pylib/carla-0.9.16-cp312-cp312-manylinux_2_31_x86_64.whl" }

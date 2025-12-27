@@ -5,7 +5,7 @@ requires-python = ">=3.12"
 [[package]]
 name = "carla"
 version = "0.9.16"
-source = { path = "../carla-pylib/carla-0.9.16-cp312-cp312-manylinux_2_31_x86_64.whl" }
+source = { path = "carla-pylib/carla-0.9.16-cp312-cp312-manylinux_2_31_x86_64.whl" }
 wheels = [
     { filename = "carla-0.9.16-cp312-cp312-manylinux_2_31_x86_64.whl", hash = "sha256:c497edf1b8747194c55b4a24b65b5010d91a4c03baf72c06d11e7cff2b961528" },
 ]
@@ -19,4 +19,4 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "carla", path = "../carla-pylib/carla-0.9.16-cp312-cp312-manylinux_2_31_x86_64.whl" }]
+requires-dist = [{ name = "carla", path = "carla-pylib/carla-0.9.16-cp312-cp312-manylinux_2_31_x86_64.whl" }]
