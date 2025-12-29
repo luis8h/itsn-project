@@ -2,8 +2,9 @@ import carla
 import time
 import math
 
-from config import SpeedData
-from ethernet import send_to_ecu_someip
+from config.cfg import cfg
+from config.data import SpeedData
+from ethernet import SOMEIPForwarder
 
 # TODO: add retry after some time if it fails, so that the script can also be started before carla
 
@@ -20,7 +21,7 @@ def main():
                 v = vehicle.get_velocity()
                 speed_ms = math.sqrt(v.x**2 + v.y**2 + v.z**2)
                 print_data(vehicle.id, speed_ms)
-                send_to_ecu_someip(vehicle.id, speed_ms)
+                # send_to_ecu_someip(vehicle.id, speed_ms)
             time.sleep(1)
 
     except Exception as e:
@@ -33,7 +34,9 @@ def print_data(vehicle_id: int, speed: float):
 
 if __name__ == '__main__':
     # main()
+    forwarder = SOMEIPForwarder(cfg.eth_interface, cfg.client_id)
+    forwarder.register_config(cfg.ecus)
     while True:
         data = SpeedData(10)
-        send_to_ecu_someip(1, data)
+        forwarder.send(data)
         time.sleep(1)

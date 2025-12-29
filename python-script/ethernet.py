@@ -1,69 +1,86 @@
-import struct
+from collections import defaultdict
+from typing import Final
 from scapy.layers.l2 import Ether
 from scapy.layers.inet import IP, UDP
 from scapy.sendrecv import sendp
 from scapy.main import load_contrib
 
-from config import DataObject, cfg
+from config.base import ECUConfig, MethodConfig, ServiceConfig
+from config.cfg import MessageType, RetCode, cfg
+from config.data import DataObject
 
-# Load the automotive contribution
-load_contrib('automotive.someip')
-
-# Now import SOMEIP
+load_contrib("automotive.someip")
 from scapy.contrib.automotive.someip import SOMEIP
-
-
-
-
-# should be configured on device because it depends directly on the device
-INTERFACE = "veth-carla"
-
-# can be configured in the carla script -> does not depend on the devices hardware, but only on the circuit it is connected to
-ECU_MAC = "00:11:22:33:44:55"
-SERVICE_ID = 0x1234
-METHOD_ID = 0x0001
-CLIENT_ID = 0x0000
-SESSION_ID = 0x0001
 
 
 # TODO: first send a service discovery message
 # the question is how often this needs to be sent (i guess it is the task of this script and not the remote device)
 
 
-def send_to_ecu_someip(vehicle_id: int, data: DataObject):
-    # 1. Create the SOME/IP Header
-    # msg_type=0x02 is 'Notification' (standard for sensor data)
-    # Updated snippet for ethernet.py
-    sip = SOMEIP(
-        srv_id=SERVICE_ID,    # Changed from service_id
-        sub_id=METHOD_ID,     # Changed from method_id (sub_id is used for Method/Event)
-        client_id=CLIENT_ID,
-        session_id=SESSION_ID,
-        msg_type=0x02,
-        proto_ver=0x01,
-        iface_ver=0x01,
-        retcode=0x00         # Changed from return_code
-    )
+class SOMEIPSessionManager:
+    # Session ID is 16-bit (0x0001 to 0xFFFF)
+    MAX_SESSION_ID: Final[int] = 0xFFFF
 
-    # 2. Pack the Payload (CARLA Data)
-    # ECU usually expects specific scaling (e.g., speed * 100 for fixed-point)
+    def __init__(self) -> None:
+        # Key: (service_id, method_id), Value: current_session_id
+        self._sessions: dict[tuple[int, int], int] = defaultdict(lambda: 1)
 
-    for ecu in cfg.ecus:
-        for service in ecu.services:
-            if type(data) not in service.methods:
-                continue
-            payload = service.methods[type(data)].converter(data)
+    def get_next_id(self, service_id: int, method_id: int) -> int:
+        key: tuple[int, int] = (service_id, method_id)
+        current: int = self._sessions[key]
 
-    # payload = struct.pack('!f', float(data))
+        # Increment and wrap logic
+        # If current is 65535, next is 1
+        self._sessions[key] = (current % self.MAX_SESSION_ID) + 1
 
-    # 3. Build the full Ethernet Frame
-    # Automotive Ethernet often bypasses OS routing, so we build the whole stack
-    pkt = (Ether(dst=ECU_MAC) /
-           IP(dst="192.168.1.10") /
-           UDP(sport=30490, dport=30490) /
-           sip /
-           payload)
+        return current
 
-    # all above this line will always be done, but this line should only be executed when the adapter is directly connected to the host that runs the python script
-    # when using the network mode, the whole pkt should be sent over tcp to the other device so that it just needs to be forwarded
-    sendp(pkt, iface=INTERFACE, verbose=False)
+
+class SOMEIPForwarder:
+    def __init__(self, interface: str, client_id: int):
+        self.interface: str = interface
+        self.client_id: int = client_id
+
+        self.session_manager: SOMEIPSessionManager = SOMEIPSessionManager()
+        self._registry: dict[
+            type, list[tuple[ECUConfig, ServiceConfig, MethodConfig[DataObject]]]
+        ] = {}
+
+    def register_config(self, ecus: list[ECUConfig]) -> None:
+        for ecu in ecus:
+            for service in ecu.services:
+                for data_type, method in service.methods.items():
+                    if data_type not in self._registry:
+                        self._registry[data_type] = []
+                    self._registry[data_type].append((ecu, service, method))
+
+    def send(self, data: DataObject) -> None:
+        targets = self._registry.get(type(data))
+        if not targets:
+            return
+
+        for ecu, service, method in targets:
+            session_id = self.session_manager.get_next_id(service.id, method.id)
+
+            # Construct SOME/IP Layer
+            sip = SOMEIP(
+                srv_id=service.id,
+                sub_id=method.id,
+                client_id=self.client_id,
+                session_id=session_id,
+                msg_type=MessageType.NOTIFICATION,
+                proto_ver=cfg.proto_ver,
+                iface_ver=service.iface_ver,
+                retcode=RetCode.E_OK,
+            )
+
+            # Build and send full packet
+            pkt = (
+                Ether(dst=ecu.mac)
+                / IP(dst=ecu.ip)
+                / UDP(sport=30490, dport=30490)
+                / sip
+                / method.converter(data)
+            )
+
+            sendp(pkt, iface=self.interface, verbose=False)
