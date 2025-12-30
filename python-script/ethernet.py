@@ -1,4 +1,6 @@
 from collections import defaultdict
+import struct
+import socket
 from typing import Final
 from scapy.layers.l2 import Ether
 from scapy.layers.inet import IP, UDP
@@ -36,15 +38,23 @@ class SOMEIPSessionManager:
         return current
 
 
+# TODO: separate package builder and forwarder into separate components
+
 class SOMEIPForwarder:
-    def __init__(self, interface: str, client_id: int):
-        self.interface: str = interface
+    def __init__(self, remote_host: str, remote_port: int, client_id: int):
+        self.remote_host: str = remote_host
+        self.remote_port: int = remote_port
+        # self.interface: str = interface
         self.client_id: int = client_id
+
+        self.sock: socket.socket | None = None
 
         self.session_manager: SOMEIPSessionManager = SOMEIPSessionManager()
         self._registry: dict[
             type, list[tuple[ECUConfig, ServiceConfig, MethodConfig[DataObject]]]
         ] = {}
+
+        self._connect()
 
     def register_config(self, ecus: list[ECUConfig]) -> None:
         for ecu in ecus:
@@ -53,6 +63,15 @@ class SOMEIPForwarder:
                     if data_type not in self._registry:
                         self._registry[data_type] = []
                     self._registry[data_type].append((ecu, service, method))
+
+    def _connect(self):
+        try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.connect((self.remote_host, self.remote_port))
+            print(f"Connected to forwarder at {self.remote_host}:{self.remote_port}")
+        except Exception as e:
+            print(f"Failed to connect: {e}")
+            self.sock = None
 
     def send(self, data: DataObject) -> None:
         targets = self._registry.get(type(data))
@@ -83,4 +102,29 @@ class SOMEIPForwarder:
                 / method.converter(data)
             )
 
-            sendp(pkt, iface=self.interface, verbose=False)
+            # Send to automotive ethernet directly
+            # sendp(pkt, iface=self.interface, verbose=False)
+
+            raw_payload = bytes(pkt)
+            self._send_over_tcp(raw_payload)
+
+    def _send_over_tcp(self, payload: bytes) -> None:
+        if self.sock is None:
+            print("Socket not connected, attempting reconnect...")
+            self._connect()
+            if self.sock is None:
+                return # Still failed
+        try:
+            # Pack length into 4 bytes, Big Endian (!I)
+            length_header = struct.pack('!I', len(payload))
+
+            # Send Length + Payload
+            self.sock.sendall(length_header + payload)
+
+        except (BrokenPipeError, ConnectionResetError):
+            print("Connection lost. Reconnecting...")
+            self.sock.close()
+            self._connect()
+            if self.sock:
+                # Retry once
+                self.sock.sendall(struct.pack('!I', len(payload)) + payload)

@@ -34,7 +34,7 @@ def print_data(vehicle_id: int, speed: float):
 
 if __name__ == '__main__':
     # main()
-    forwarder = SOMEIPForwarder(cfg.eth_interface, cfg.client_id)
+    forwarder = SOMEIPForwarder("127.0.0.1", 9000, cfg.client_id)
     forwarder.register_config(cfg.ecus)
     while True:
         data = SpeedData(10)
