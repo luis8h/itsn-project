@@ -3,18 +3,14 @@ from config.ecus import ecu_1, ecu_2
 import enum
 
 
-class MessageType(int, enum.Enum):
-    NOTIFICATION = 0x02
-
-class RetCode(int, enum.Enum):
-    E_OK = 0x00
-
-
+# TODO: use a library here that lets all config values be set from the command line
 class Config:
     client_id: int = 0x0001  # id of the carla client (same for all messages)
     ecus: list[ECUConfig] = [ecu_1, ecu_2]
     eth_interface: str = "veth-carla"  # optional (only required if the script is connected to automotive ethernet directly)
     proto_ver: int = 0x01
+    remote_host: str = "127.0.0.1"
+    remote_port: int = 9000
 
     # TODO: potential performance improvement (maybe use caching)
     # def __post_init__(self):

@@ -1,3 +1,5 @@
+from communicator import TCPCommunicator
+from packager import SOMEIPPackager
 import carla
 import time
 import math
@@ -7,6 +9,10 @@ from config.data import SpeedData
 from ethernet import SOMEIPForwarder
 
 # TODO: add retry after some time if it fails, so that the script can also be started before carla
+# TODO: add proper logging
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
 
 def main():
     client = carla.Client('localhost', 2000)
@@ -34,9 +40,13 @@ def print_data(vehicle_id: int, speed: float):
 
 if __name__ == '__main__':
     # main()
-    forwarder = SOMEIPForwarder("127.0.0.1", 9000, cfg.client_id)
-    forwarder.register_config(cfg.ecus)
+    packager = SOMEIPPackager(cfg.client_id, cfg.proto_ver, cfg.ecus)
+    communicator = TCPCommunicator(cfg.remote_host, cfg.remote_port)
+
     while True:
         data = SpeedData(10)
-        forwarder.send(data)
+
+        packages = packager.package(data)
+        communicator.send_packets(packages)
+
         time.sleep(1)
