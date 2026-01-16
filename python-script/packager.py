@@ -76,7 +76,7 @@ class SOMEIPPackager:
                 retcode=RetCode.E_OK,
             )
 
-            # Build and send full packet
+            # Build packet
             pkt = (
                 Ether(dst=ecu.mac)
                 / IP(dst=ecu.ip)
