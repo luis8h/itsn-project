@@ -1,124 +1,154 @@
-use pnet::datalink::{self, Channel, DataLinkSender};
+use pnet::datalink::{self, Channel, DataLinkReceiver, DataLinkSender, NetworkInterface};
 use std::error::Error;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use tokio::io::AsyncWriteExt;
-use tokio::io::{AsyncReadExt, BufReader};
+use std::thread;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::broadcast;
 
-const USB_INTERFACE_NAME: &str = "veth-carla";
+// ------------------------------------------------------------------
+// FIX: Define a custom Error type that is thread-safe (Send + Sync)
+// ------------------------------------------------------------------
+type BoxError = Box<dyn Error + Send + Sync>;
+
+const CONFIG_INTERFACE_NAME: &str = "veth-carla";
+const CONFIG_TCP_ADDR: &str = "127.0.0.1:9000";
+const MAX_PACKET_SIZE: usize = 4096;
+const BROADCAST_QUEUE_SIZE: usize = 100;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    let addr = "127.0.0.1:9000";
+async fn main() -> Result<(), BoxError> { // Updated return type
+    println!("🚀 Starting Automotive Ethernet Bridge...");
 
-    // Find the network interface by name
-    let interfaces = datalink::interfaces();
-    let interface = interfaces
-        .into_iter()
-        .find(|iface| iface.name == USB_INTERFACE_NAME)
-        .ok_or_else(|| format!("Could not find interface: {}", USB_INTERFACE_NAME))?;
+    // Note: The error mapping here ensures the string error is converted to our BoxError
+    let interface = find_interface(CONFIG_INTERFACE_NAME)?;
 
-    println!(
-        "Found interface: {} (MAC: {:?})",
-        interface.name, interface.mac
-    );
+    let (eth_tx, _) = broadcast::channel::<Vec<u8>>(BROADCAST_QUEUE_SIZE);
 
-    // Open a raw socket channel to the interface
-    // NOTE: later use rx as a receiver for bidirectional messages
-    let (mut tx, _rx) = match datalink::channel(&interface, Default::default()) {
+    let (tx_link, mut rx_link) = match datalink::channel(&interface, Default::default()) {
         Ok(Channel::Ethernet(tx, rx)) => (tx, rx),
         Ok(_) => return Err("Unhandled channel type (not Ethernet)".into()),
         Err(e) => return Err(format!("Failed to create datalink channel: {}", e).into()),
     };
 
-    // Wrap the sender in Arc<Mutex> so it can be shared across async tasks
-    let packet_sender = Arc::new(Mutex::new(tx));
+    let eth_tx_clone = eth_tx.clone();
+    thread::spawn(move || {
+        if let Err(e) = run_ethernet_ingress_loop(&mut *rx_link, eth_tx_clone) {
+            eprintln!("💥 Ethernet ingress thread died: {}", e);
+        }
+    });
 
-    // Start TCP Listener
-    let listener = TcpListener::bind(addr).await?;
-    println!("SOME/IP Receiver listening on {}", addr);
-    println!("Forwarding targets to: {}", USB_INTERFACE_NAME);
+    let eth_sender = Arc::new(Mutex::new(tx_link));
+    let listener = TcpListener::bind(CONFIG_TCP_ADDR).await?;
+
+    println!("✅ Bridge active on {}", CONFIG_TCP_ADDR);
 
     loop {
         let (socket, addr) = listener.accept().await?;
-        println!("📡 Client connected: {}", addr);
-
-        // Clone the sender handle for this specific task
-        let sender_clone = packet_sender.clone();
+        let eth_sender = eth_sender.clone();
+        let eth_rx_subscriber = eth_tx.subscribe();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_client(socket, sender_clone).await {
-                eprintln!("ℹ️ Client session ended: {}", e);
+            if let Err(e) = handle_client_session(socket, eth_sender, eth_rx_subscriber).await {
+                eprintln!("⚠️ Client {} disconnected: {}", addr, e);
             }
         });
     }
 }
 
-async fn handle_client(
+fn find_interface(name: &str) -> Result<NetworkInterface, BoxError> {
+    datalink::interfaces()
+        .into_iter()
+        .find(|iface| iface.name == name)
+        .ok_or_else(|| format!("Interface '{}' not found", name).into())
+}
+
+// Updated Signature: Returns BoxError
+// Inside run_ethernet_ingress_loop
+fn run_ethernet_ingress_loop(
+    rx: &mut dyn DataLinkReceiver,
+    broadcaster: broadcast::Sender<Vec<u8>>,
+) -> Result<(), BoxError> {
+    loop {
+        match rx.next() {
+            Ok(packet) => {
+                // LOG: Physical Ethernet Ingress
+                println!("[ETH -> BUS] Received {} bytes from interface", packet.len());
+
+                let packet_vec = packet.to_vec();
+                let _ = broadcaster.send(packet_vec);
+            }
+            Err(e) => {
+                eprintln!("[!] Ethernet Read Error: {}", e);
+            }
+        }
+    }
+}
+
+// Inside handle_client_session
+async fn handle_client_session(
     mut stream: TcpStream,
-    sender: Arc<Mutex<Box<dyn DataLinkSender>>>,
-) -> Result<(), Box<dyn Error>> {
-    // 1. Split the TCP stream into a reader and a writer
+    eth_sender: Arc<Mutex<Box<dyn DataLinkSender>>>,
+    mut eth_receiver: broadcast::Receiver<Vec<u8>>,
+) -> Result<(), BoxError> {
+    let addr = stream.peer_addr().unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap());
     let (reader, mut writer) = stream.split();
     let mut buf_reader = BufReader::new(reader);
 
-    println!("🔄 Bidirectional bridge established.");
-
-    // 2. Run two tasks concurrently
-    tokio::select! {
-        // --- TASK 1: TCP -> Automotive Ethernet ---
-        res = async {
-            let mut packet_buffer = [0u8; 2048];
-            println!("👀 Task 1: Waiting for data from TCP...");
-            loop {
+    loop {
+        tokio::select! {
+            // Task 1: TCP -> Ethernet
+            result = async {
                 let mut len_buf = [0u8; 4];
                 buf_reader.read_exact(&mut len_buf).await?;
                 let packet_len = u32::from_be_bytes(len_buf) as usize;
-                println!("📏 Header received! Expecting {} bytes of payload.", packet_len); // <--- CHECK 2
 
-                if packet_len > packet_buffer.len() {
-                    return Err("Packet too large".into());
+                if packet_len > MAX_PACKET_SIZE {
+                    return Err(format!("Packet too large: {}", packet_len).into());
                 }
 
-                let frame_data = &mut packet_buffer[0..packet_len];
-                buf_reader.read_exact(frame_data).await?;
+                let mut buffer = vec![0u8; packet_len];
+                buf_reader.read_exact(&mut buffer).await?;
 
-                // --- ADD THIS PRINT BLOCK ---
-                println!("📦 Forwarding Packet ({} bytes):", packet_len);
-                // Prints as hex bytes: [00, AF, 12, ...]
-                println!("{:02X?}", frame_data);
-                // ----------------------------
+                Ok::<Vec<u8>, BoxError>(buffer)
+            } => {
+                match result {
+                    Ok(payload) => {
+                        // LOG: TCP to Physical Ethernet
+                        println!("[TCP -> ETH] Client {} sending {} bytes", addr, payload.len());
 
-                // Send to Hardware
-                {
-                    let mut tx = sender.lock().unwrap();
-                    tx.send_to(frame_data, None);
+                        let mut tx = eth_sender.lock().unwrap();
+                        tx.send_to(&payload, None);
+                    }
+                    Err(_) => {
+                        println!("[i] Client {} closed TCP connection", addr);
+                        return Ok(());
+                    }
                 }
             }
-            // Explicitly define the return type for this block
-            #[allow(unreachable_code)]
-            Ok::<(), Box<dyn Error>>(())
-        } => res,
 
-        // --- TASK 2: Dummy Data (or Hardware) -> TCP ---
-        res = async {
-            let mut interval = tokio::time::interval(Duration::from_secs(2));
-            loop {
-                interval.tick().await;
+            // Task 2: Ethernet -> TCP
+            recv_result = eth_receiver.recv() => {
+                match recv_result {
+                    Ok(packet) => {
+                        // LOG: Bridge to TCP Client
+                        println!("[ETH -> TCP] Forwarding {} bytes to client {}", packet.len(), addr);
 
-                let dummy_msg = b"STILL_ALIVE";
-                let len_header = (dummy_msg.len() as u32).to_be_bytes();
-
-                // Write [Length] + [Payload] back to the TCP Client
-                writer.write_all(&len_header).await?;
-                writer.write_all(dummy_msg).await?;
-                writer.flush().await?;
-
-                println!("📤 Dummy heartbeat sent to TCP client");
+                        let len_header = (packet.len() as u32).to_be_bytes();
+                        if let Err(e) = writer.write_all(&len_header).await {
+                             eprintln!("[!] TCP Write Error: {}", e);
+                             return Err(e.into());
+                        }
+                        writer.write_all(&packet).await?;
+                        writer.flush().await?;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(count)) => {
+                        eprintln!("[!] Client {} lagged: missed {} packets", addr, count);
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return Ok(()),
+                }
             }
-            #[allow(unreachable_code)]
-            Ok::<(), Box<dyn Error>>(())
-        } => res,
+        }
     }
 }
