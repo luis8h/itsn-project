@@ -1,8 +1,10 @@
-use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncReadExt, BufReader};
+use pnet::datalink::{self, Channel, DataLinkSender};
 use std::error::Error;
 use std::sync::{Arc, Mutex};
-use pnet::datalink::{self, Channel, DataLinkSender};
+use std::time::Duration;
+use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
 
 const USB_INTERFACE_NAME: &str = "veth-carla";
 
@@ -17,7 +19,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .find(|iface| iface.name == USB_INTERFACE_NAME)
         .ok_or_else(|| format!("Could not find interface: {}", USB_INTERFACE_NAME))?;
 
-    println!("Found interface: {} (MAC: {:?})", interface.name, interface.mac);
+    println!(
+        "Found interface: {} (MAC: {:?})",
+        interface.name, interface.mac
+    );
 
     // Open a raw socket channel to the interface
     // NOTE: later use rx as a receiver for bidirectional messages
@@ -52,43 +57,68 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 async fn handle_client(
     mut stream: TcpStream,
-    sender: Arc<Mutex<Box<dyn DataLinkSender>>>
+    sender: Arc<Mutex<Box<dyn DataLinkSender>>>,
 ) -> Result<(), Box<dyn Error>> {
-    let mut reader = BufReader::new(&mut stream);
-    // Buffer for the incoming TCP stream data
-    let mut packet_buffer = [0u8; 2048];
+    // 1. Split the TCP stream into a reader and a writer
+    let (reader, mut writer) = stream.split();
+    let mut buf_reader = BufReader::new(reader);
 
-    loop {
-        // 1. Read the 4-byte length header
-        let mut len_buf = [0u8; 4];
-        reader.read_exact(&mut len_buf).await?;
+    println!("🔄 Bidirectional bridge established.");
 
-        let packet_len = u32::from_be_bytes(len_buf) as usize;
+    // 2. Run two tasks concurrently
+    tokio::select! {
+        // --- TASK 1: TCP -> Automotive Ethernet ---
+        res = async {
+            let mut packet_buffer = [0u8; 2048];
+            println!("👀 Task 1: Waiting for data from TCP...");
+            loop {
+                let mut len_buf = [0u8; 4];
+                buf_reader.read_exact(&mut len_buf).await?;
+                let packet_len = u32::from_be_bytes(len_buf) as usize;
+                println!("📏 Header received! Expecting {} bytes of payload.", packet_len); // <--- CHECK 2
 
-        if packet_len > packet_buffer.len() {
-            return Err("Packet size exceeds buffer limit".into());
-        }
+                if packet_len > packet_buffer.len() {
+                    return Err("Packet too large".into());
+                }
 
-        let frame_data = &mut packet_buffer[0..packet_len];
-        reader.read_exact(frame_data).await?;
+                let frame_data = &mut packet_buffer[0..packet_len];
+                buf_reader.read_exact(frame_data).await?;
 
-        // Assuming 'frame_data' contains the full Ethernet header + Payload
-        // TODO: maybe add a check here (might affect performance)
-        if packet_len >= 14 { // Minimum Ethernet frame size
-             println!("Received Frame | Length: {} bytes | Dest MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                packet_len,
-                frame_data[0], frame_data[1], frame_data[2], frame_data[3], frame_data[4], frame_data[5]
-            );
+                // --- ADD THIS PRINT BLOCK ---
+                println!("📦 Forwarding Packet ({} bytes):", packet_len);
+                // Prints as hex bytes: [00, AF, 12, ...]
+                println!("{:02X?}", frame_data);
+                // ----------------------------
 
-            // NOTE: pnet operations are blocking
-            {
-                let mut tx = sender.lock().unwrap();
-
-                tx.build_and_send(1, packet_len, &mut |new_packet| {
-                    new_packet.copy_from_slice(frame_data);
-                });
+                // Send to Hardware
+                {
+                    let mut tx = sender.lock().unwrap();
+                    tx.send_to(frame_data, None);
+                }
             }
-            // ---------------------------------------------
-        }
+            // Explicitly define the return type for this block
+            #[allow(unreachable_code)]
+            Ok::<(), Box<dyn Error>>(())
+        } => res,
+
+        // --- TASK 2: Dummy Data (or Hardware) -> TCP ---
+        res = async {
+            let mut interval = tokio::time::interval(Duration::from_secs(2));
+            loop {
+                interval.tick().await;
+
+                let dummy_msg = b"STILL_ALIVE";
+                let len_header = (dummy_msg.len() as u32).to_be_bytes();
+
+                // Write [Length] + [Payload] back to the TCP Client
+                writer.write_all(&len_header).await?;
+                writer.write_all(dummy_msg).await?;
+                writer.flush().await?;
+
+                println!("📤 Dummy heartbeat sent to TCP client");
+            }
+            #[allow(unreachable_code)]
+            Ok::<(), Box<dyn Error>>(())
+        } => res,
     }
 }
