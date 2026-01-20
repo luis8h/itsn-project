@@ -1,3 +1,4 @@
+use clap::Parser; // Import clap
 use pnet::datalink::{self, Channel, DataLinkReceiver, DataLinkSender, NetworkInterface};
 use std::error::Error;
 use std::sync::{Arc, Mutex};
@@ -7,21 +8,46 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 
 // ------------------------------------------------------------------
-// FIX: Define a custom Error type that is thread-safe (Send + Sync)
+// ARGUMENT PARSING STRUCT
+// ------------------------------------------------------------------
+use std::net::IpAddr;
+
+#[derive(Parser, Debug)]
+#[command(author, version, about)]
+struct Args {
+    /// Name of the network interface (e.g., veth-carla)
+    #[arg(short = 'i', long, default_value = "veth-carla")]
+    interface: String,
+
+    /// IP address to bind to (e.g., 127.0.0.1 or 0.0.0.0)
+    #[arg(short = 'H', long, default_value = "127.0.0.1")]
+    host: IpAddr,
+
+    /// TCP port to listen on
+    #[arg(short = 'p', long, default_value_t = 9000)]
+    port: u16,
+}
+// ------------------------------------------------------------------
+// ERROR HANDLING
 // ------------------------------------------------------------------
 type BoxError = Box<dyn Error + Send + Sync>;
 
-const CONFIG_INTERFACE_NAME: &str = "veth-carla";
-const CONFIG_TCP_ADDR: &str = "127.0.0.1:9000";
 const MAX_PACKET_SIZE: usize = 4096;
 const BROADCAST_QUEUE_SIZE: usize = 100;
 
 #[tokio::main]
-async fn main() -> Result<(), BoxError> { // Updated return type
-    println!("🚀 Starting Automotive Ethernet Bridge...");
+async fn main() -> Result<(), BoxError> {
+    // Parse arguments from command line
+    let args = Args::parse();
 
-    // Note: The error mapping here ensures the string error is converted to our BoxError
-    let interface = find_interface(CONFIG_INTERFACE_NAME)?;
+    let bind_addr = format!("{}:{}", args.host, args.port);
+
+    println!("🚀 Starting Automotive Ethernet Bridge...");
+    println!("   Config Interface: {}", args.interface);
+    println!("   Config TCP Addr:  {}", bind_addr);
+
+    // Use the parsed interface name
+    let interface = find_interface(&args.interface)?;
 
     let (eth_tx, _) = broadcast::channel::<Vec<u8>>(BROADCAST_QUEUE_SIZE);
 
@@ -32,6 +58,8 @@ async fn main() -> Result<(), BoxError> { // Updated return type
     };
 
     let eth_tx_clone = eth_tx.clone();
+
+    // Spawn blocking thread for pnet (datalink is often blocking)
     thread::spawn(move || {
         if let Err(e) = run_ethernet_ingress_loop(&mut *rx_link, eth_tx_clone) {
             eprintln!("💥 Ethernet ingress thread died: {}", e);
@@ -39,9 +67,11 @@ async fn main() -> Result<(), BoxError> { // Updated return type
     });
 
     let eth_sender = Arc::new(Mutex::new(tx_link));
-    let listener = TcpListener::bind(CONFIG_TCP_ADDR).await?;
 
-    println!("✅ Bridge active on {}", CONFIG_TCP_ADDR);
+    // Use the parsed address for binding
+    let listener = TcpListener::bind(&bind_addr).await?;
+
+    println!("✅ Bridge active on {}", bind_addr);
 
     loop {
         let (socket, addr) = listener.accept().await?;
@@ -63,8 +93,6 @@ fn find_interface(name: &str) -> Result<NetworkInterface, BoxError> {
         .ok_or_else(|| format!("Interface '{}' not found", name).into())
 }
 
-// Updated Signature: Returns BoxError
-// Inside run_ethernet_ingress_loop
 fn run_ethernet_ingress_loop(
     rx: &mut dyn DataLinkReceiver,
     broadcaster: broadcast::Sender<Vec<u8>>,
@@ -72,9 +100,8 @@ fn run_ethernet_ingress_loop(
     loop {
         match rx.next() {
             Ok(packet) => {
-                // LOG: Physical Ethernet Ingress
-                println!("[ETH -> BUS] Received {} bytes from interface", packet.len());
-
+                // Remove generic print to reduce noise, or keep debug flag
+                // println!("[ETH -> BUS] Received {} bytes from interface", packet.len());
                 let packet_vec = packet.to_vec();
                 let _ = broadcaster.send(packet_vec);
             }
@@ -85,7 +112,6 @@ fn run_ethernet_ingress_loop(
     }
 }
 
-// Inside handle_client_session
 async fn handle_client_session(
     mut stream: TcpStream,
     eth_sender: Arc<Mutex<Box<dyn DataLinkSender>>>,
@@ -97,7 +123,6 @@ async fn handle_client_session(
 
     loop {
         tokio::select! {
-            // Task 1: TCP -> Ethernet
             result = async {
                 let mut len_buf = [0u8; 4];
                 buf_reader.read_exact(&mut len_buf).await?;
@@ -114,9 +139,7 @@ async fn handle_client_session(
             } => {
                 match result {
                     Ok(payload) => {
-                        // LOG: TCP to Physical Ethernet
                         println!("[TCP -> ETH] Client {} sending {} bytes", addr, payload.len());
-
                         let mut tx = eth_sender.lock().unwrap();
                         tx.send_to(&payload, None);
                     }
@@ -126,14 +149,10 @@ async fn handle_client_session(
                     }
                 }
             }
-
-            // Task 2: Ethernet -> TCP
             recv_result = eth_receiver.recv() => {
                 match recv_result {
                     Ok(packet) => {
-                        // LOG: Bridge to TCP Client
                         println!("[ETH -> TCP] Forwarding {} bytes to client {}", packet.len(), addr);
-
                         let len_header = (packet.len() as u32).to_be_bytes();
                         if let Err(e) = writer.write_all(&len_header).await {
                              eprintln!("[!] TCP Write Error: {}", e);

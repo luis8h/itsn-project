@@ -19,7 +19,7 @@ def receive_callback(data: bytes):
 
 def main():
     packager = SOMEIPPackager(cfg.client_id, cfg.proto_ver, cfg.ecus)
-    communicator = TCPCommunicator(cfg.remote_host, cfg.remote_port, receive_callback)
+    communicator = TCPCommunicator(cfg.cmd.remote_host, cfg.cmd.remote_port, receive_callback)
 
     while True:
         data = SpeedData(10)
