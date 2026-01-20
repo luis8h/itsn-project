@@ -6,8 +6,6 @@ import logging
 from config.cfg import cfg
 from config.data import SpeedData
 
-# TODO: add retry after some time if it fails, so that the script can also be started before carla
-# TODO: add proper logging
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
