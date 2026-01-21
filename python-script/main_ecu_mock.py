@@ -13,6 +13,8 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
+# NOTE: This script does not demonstrate how this project should be used, it is only used to provide a mocked ecu so that it can be tested without physical ecus sending packets
+
 
 # Configuring a subscriber here, so that this script will send the mocked GPS Data to this ecu.
 ecu_sending = ECUConfig(

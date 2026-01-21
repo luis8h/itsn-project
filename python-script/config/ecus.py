@@ -9,6 +9,8 @@ from config.base import (
 from config.data import GPSCoordData, SpeedData, SteeringAngleData
 
 
+# This is a sample config of ecus. An ecu can have multiple Subscriber and Publisher Methods
+
 ecu_1: ECUConfig = ECUConfig(
     "ecu_2",
     "192.168.1.10",

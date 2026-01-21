@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 
+# Only used to ensure typesafety
 class DataObject:
     pass
 

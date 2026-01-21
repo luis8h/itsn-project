@@ -11,6 +11,8 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
+# This main function sends sample data (speed and steering angle).
+# It will also receive packets and print their data
 def main():
     packager = SOMEIPPackager(cfg.client_id, cfg.proto_ver, cfg.ecus)
 

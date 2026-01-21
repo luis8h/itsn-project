@@ -1,7 +1,5 @@
-## ITSN Project
 
-
-## Tips
+## Getting Started
 
 #### Test Setup (VLAN)
 ```sh
@@ -12,11 +10,14 @@ sudo ip link add veth-carla type veth peer name veth-ecu
 sudo ip link set veth-carla up
 sudo ip link set veth-ecu up
 
-# (Optional) Assign an IP to the 'carla' side if needed
 sudo ip addr add 192.168.1.5/24 dev veth-carla
 ```
-Now `veth-carla` can be used in the script to send packets and they should appear in wireshark under the interface `veth-ecu`.
-Just run the [python script](./python-script/readme.md) and the [tcp-receiver](./tcp-receiver/readme.md). Make sure to configure the receiver to use the `veth-carla` interface.
+To be able to test the bidirectional setup, it is possible to start 2 clients and 2 servers and let them communicate with each other
+
+For more info on how to run the server and client look into the [python script](./python-script/readme.md) and [tcp-receiver](./tcp-receiver/readme.md).
+
+
+## Tips
 
 #### Wireshark - SOME/IP
 To make the SOME/IP packets visible in wireshark and show the service, method and session id follow these steps:
