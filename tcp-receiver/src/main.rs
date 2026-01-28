@@ -1,4 +1,4 @@
-use clap::Parser; // Import clap
+use clap::Parser;
 use pnet::datalink::{self, Channel, DataLinkReceiver, DataLinkSender, NetworkInterface};
 use std::error::Error;
 use std::sync::{Arc, Mutex};
@@ -11,7 +11,6 @@ use tokio::sync::broadcast;
 // ARGUMENT PARSING STRUCT
 // ------------------------------------------------------------------
 use std::net::IpAddr;
-
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
 struct Args {
@@ -27,24 +26,23 @@ struct Args {
     #[arg(short = 'p', long, default_value_t = 9000)]
     port: u16,
 }
-// ------------------------------------------------------------------
-// ERROR HANDLING
-// ------------------------------------------------------------------
+
+
 type BoxError = Box<dyn Error + Send + Sync>;
 
 const MAX_PACKET_SIZE: usize = 4096;
 const BROADCAST_QUEUE_SIZE: usize = 100;
 
+// Main function -> entry point
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
     // Parse arguments from command line
     let args = Args::parse();
-
     let bind_addr = format!("{}:{}", args.host, args.port);
 
-    println!("🚀 Starting Automotive Ethernet Bridge...");
-    println!("   Config Interface: {}", args.interface);
-    println!("   Config TCP Addr:  {}", bind_addr);
+    println!("Starting Automotive Ethernet Bridge...");
+    println!("Config Interface: {}", args.interface);
+    println!("Config TCP Addr:  {}", bind_addr);
 
     // Use the parsed interface name
     let interface = find_interface(&args.interface)?;
@@ -59,19 +57,17 @@ async fn main() -> Result<(), BoxError> {
 
     let eth_tx_clone = eth_tx.clone();
 
-    // Spawn blocking thread for pnet (datalink is often blocking)
+    // Spawn thread for pnet
     thread::spawn(move || {
         if let Err(e) = run_ethernet_ingress_loop(&mut *rx_link, eth_tx_clone) {
-            eprintln!("💥 Ethernet ingress thread died: {}", e);
+            eprintln!("Ethernet thread died: {}", e);
         }
     });
 
     let eth_sender = Arc::new(Mutex::new(tx_link));
-
-    // Use the parsed address for binding
     let listener = TcpListener::bind(&bind_addr).await?;
 
-    println!("✅ Bridge active on {}", bind_addr);
+    println!("Bridge active on {}", bind_addr);
 
     loop {
         let (socket, addr) = listener.accept().await?;
@@ -80,7 +76,7 @@ async fn main() -> Result<(), BoxError> {
 
         tokio::spawn(async move {
             if let Err(e) = handle_client_session(socket, eth_sender, eth_rx_subscriber).await {
-                eprintln!("⚠️ Client {} disconnected: {}", addr, e);
+                eprintln!("Client {} disconnected: {}", addr, e);
             }
         });
     }
@@ -100,8 +96,6 @@ fn run_ethernet_ingress_loop(
     loop {
         match rx.next() {
             Ok(packet) => {
-                // Remove generic print to reduce noise, or keep debug flag
-                // println!("[ETH -> BUS] Received {} bytes from interface", packet.len());
                 let packet_vec = packet.to_vec();
                 let _ = broadcaster.send(packet_vec);
             }

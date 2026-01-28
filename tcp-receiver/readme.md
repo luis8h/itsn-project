@@ -1,5 +1,8 @@
 ## Getting Started
 
+#### Install Dependencies
+Install [cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html) for your operating system.
+
 #### General Start
 Run the app with root priveleges (for access to the ethernet interfaces):
 ```sh

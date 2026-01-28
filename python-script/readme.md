@@ -1,5 +1,8 @@
 ## Getting Started
 
+#### Install Dependencies
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) for your operating system.
+
 #### General Start
 Start a carla server and then run the script:
 ```sh
